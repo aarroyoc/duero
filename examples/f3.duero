@@ -1,0 +1,6 @@
+main :- f(X), g(X), h(X).
+f(Y) :- prinka(Y).
+h(X) :- prinka(X).
+g(Z) :- Z := 42.
+
+prinka(42) :- print(prinka).
