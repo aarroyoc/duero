@@ -1,0 +1,3 @@
+main :- X is 10 + N, N := 1, res(X).
+res(11) :- print(ok).
+res(X) :- print(notok).

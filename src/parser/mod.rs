@@ -61,7 +61,7 @@ fn rule(input: &str) -> IResult<&str, Rule> {
 }
 
 fn body(input: &str) -> IResult<&str, BodyExpr> {
-    alt((body_print, body_str_call, body_assign, body_atom_call))(input)
+    alt((body_print, body_str_call, body_assign, body_is, body_atom_call))(input)
 }
 
 fn body_str_call(input: &str) -> IResult<&str, BodyExpr> {
@@ -74,6 +74,16 @@ fn body_atom_call(input: &str) -> IResult<&str, BodyExpr> {
     let (input, atom) = atom(input)?;
 
     Ok((input, BodyExpr::Call(atom)))
+}
+
+fn body_is(input: &str) -> IResult<&str, BodyExpr> {
+    let (input, var) = var(input)?;
+    let (input, _) = space1(input)?;
+    let (input, tag) = tag("is")(input)?;
+    let (input, _) = space1(input)?;
+    let (input, math) = math(input)?;
+
+    Ok((input, BodyExpr::Is { left: var, right: math }))
 }
 
 fn body_assign(input: &str) -> IResult<&str, BodyExpr> {
@@ -94,6 +104,36 @@ fn body_print(input: &str) -> IResult<&str, BodyExpr> {
     Ok((input, BodyExpr::Print {
 	msg: data
     }))
+}
+
+fn math(input: &str) -> IResult<&str, MathExpr> {
+    alt((math_sum, math_sub, math_num))(input)
+}
+
+fn math_sum(input: &str) -> IResult<&str, MathExpr> {
+    let (input, a) = math_num(input)?;
+    let (input, _) = space1(input)?;
+    let (input, _) = tag("+")(input)?;
+    let (input, _) = space1(input)?;    
+    let (input, b) = math(input)?;
+
+    Ok((input, MathExpr::Sum(Box::new(a), Box::new(b))))
+}
+
+fn math_sub(input: &str) -> IResult<&str, MathExpr> {
+    let (input, math_num) = math_num(input)?;
+    let (input, _) = space1(input)?;
+    let (input, _) = tag("-")(input)?;
+    let (input, _) = space1(input)?;    
+    let (input, math) = math(input)?;
+
+    Ok((input, MathExpr::Sub(Box::new(math_num), Box::new(math))))
+}
+
+fn math_num(input: &str) -> IResult<&str, MathExpr> {
+    let (input, math_num) = alt((number, var))(input)?;
+
+    Ok((input, MathExpr::Num(math_num)))
 }
 
 fn basic_type(input: &str) -> IResult<&str, BasicType> {

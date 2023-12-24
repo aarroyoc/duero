@@ -34,8 +34,11 @@ pub enum BodyExpr {
     }
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, Clone)]
 pub enum MathExpr {
+    Num(BasicType),
+    Sum(Box<MathExpr>, Box<MathExpr>),
+    Sub(Box<MathExpr>, Box<MathExpr>),
 }
 
 #[derive(Debug, Clone)]

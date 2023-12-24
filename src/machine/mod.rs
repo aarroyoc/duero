@@ -44,10 +44,33 @@ fn add_vars_not_in_head(matches: &mut VarSubstitution, body_exprs: &Vec<BodyExpr
 		    }
 		}
 	    },
+	    BodyExpr::Is { left, right } => {
+		if let BasicType::Var { name, value } = left {
+		    if let None = matches.get(name) {
+			matches.insert(name.clone(), BasicType::Var { name: name.clone(), value: value.clone()});
+		    }
+		}
+	    },
 	    BodyExpr::Call(call) => {
 		add_vars_not_in_head_basic_type(matches, &call);
 	    },
 	    _ => unreachable!()
+	}
+    }
+}
+
+fn add_vars_not_in_head_math_expr(matches: &mut VarSubstitution, math_expr: &MathExpr) {
+    match math_expr {
+	MathExpr::Sum(a, b) => {
+	    add_vars_not_in_head_math_expr(matches, a);
+    	    add_vars_not_in_head_math_expr(matches, b);
+	},
+	MathExpr::Sub(a, b) => {
+	    add_vars_not_in_head_math_expr(matches, a);
+    	    add_vars_not_in_head_math_expr(matches, b);
+	},
+	MathExpr::Num(basic_type) => {
+	    add_vars_not_in_head_basic_type(matches, basic_type);
 	}
     }
 }
@@ -110,6 +133,23 @@ async fn run_body_expr(body: &BodyExpr, matches: &VarSubstitution) -> State {
 	    }
 	    State::Stop
 	}
+	BodyExpr::Is { left, right } => {
+	    let args = subst_matches(&vec![left.clone()], matches);
+	    let math_expr = subst_matches_math_expr(right, matches);
+
+	    if let BasicType::Var { value: var_value, .. } = &args[0] {
+		let result = eval_math_expr(&math_expr).await;
+		let mut data = var_value.channel.lock.write().await;
+		match *data {
+		    None => {
+			*data = Some(BasicType::Number(result));
+		    },
+		    _ => unreachable!()
+		}
+		var_value.channel.notify.notify_waiters();
+	    }
+	    State::Stop
+	}
 	_ => unreachable!()
     }
 }
@@ -126,6 +166,21 @@ fn subst_matches(args: &Vec<BasicType>, matches: &VarSubstitution) -> Vec<BasicT
 	    _ => x.clone()
 	}
     }).collect()
+}
+
+fn subst_matches_math_expr(math_expr: &MathExpr, matches: &VarSubstitution) -> MathExpr {
+    match math_expr {
+	MathExpr::Num(a) => {
+	    let args = subst_matches(&vec![a.clone()], matches);
+	    MathExpr::Num(args[0].clone())
+	}
+	MathExpr::Sum(a, b) => {
+	    MathExpr::Sum(Box::new(subst_matches_math_expr(a, matches)), Box::new(subst_matches_math_expr(b, matches)))
+	}
+	MathExpr::Sub(a, b) => {
+	    MathExpr::Sub(Box::new(subst_matches_math_expr(a, matches)), Box::new(subst_matches_math_expr(b, matches)))
+	}	
+    }
 }
 
 #[async_recursion]
@@ -215,5 +270,49 @@ async fn pattern_match(data: &BasicType, pattern: &BasicType) -> Option<VarSubst
 	(BasicType::Number(_), BasicType::Str { .. }) => None,
 	(BasicType::Str { .. }, BasicType::Number(_)) => None,
 	_ => unreachable!()
+    }
+}
+
+#[async_recursion]
+async fn eval_math_expr(expr: &MathExpr) -> i64 {
+    match expr {
+	MathExpr::Num(basic_type) => {
+	    match basic_type {
+		BasicType::Number(x) => *x,
+		BasicType::Var { value, .. } => {
+		    {
+			let data = value.channel.lock.read().await;
+			if let Some(ref x) = *data {
+			    if let BasicType::Number(x) = x { 
+				return *x;
+			    } else {
+				panic!("Not a number");
+			    }
+			}
+		    }
+		    value.channel.notify.notified().await;
+		    {
+			let data = value.channel.lock.read().await;
+			if let Some(ref x) = *data {
+			    if let BasicType::Number(x) = x {
+				return *x;
+			    } else {
+				panic!("Not a number");
+			    }
+			}
+			panic!("Not a value");
+		    }
+		},
+		_ => unreachable!()
+	    }
+	},
+	MathExpr::Sum(a, b) => {
+	    let (a, b) = tokio::join!(eval_math_expr(a), eval_math_expr(b));
+	    a + b
+	},
+	MathExpr::Sub(a, b) => {
+	    let (a, b) = tokio::join!(eval_math_expr(a), eval_math_expr(b));
+	    a - b
+	}	
     }
 }
