@@ -1,0 +1,4 @@
+producer(Stream) :- Stream := a(5, Stream1), producer(Stream1).
+consumer(a(N, Stream)) :- print(N), consumer(Stream).
+
+main :- producer(Stream), consumer(Stream).

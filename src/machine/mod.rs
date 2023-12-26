@@ -43,12 +43,9 @@ pub async fn run(query: BasicType, program: &Program) {
 fn add_vars_not_in_head(matches: &mut VarSubstitution, body_exprs: &Vec<BodyExpr>) {
     for body in body_exprs {
 	match body {
-	    BodyExpr::Assign { var, .. } => {
-		if let BasicType::Var { name, value } = var {
-		    if let None = matches.get(name) {
-			matches.insert(name.clone(), BasicType::Var { name: name.clone(), value: VarValue::new()});
-		    }
-		}
+	    BodyExpr::Assign { var, value } => {
+		add_vars_not_in_head_basic_type(matches, &var);
+		add_vars_not_in_head_basic_type(matches, &value);
 	    },
 	    BodyExpr::Is { left, right } => {
 		if let BasicType::Var { name, value } = left {
@@ -163,6 +160,9 @@ fn subst_matches(args: &Vec<BasicType>, matches: &VarSubstitution) -> Vec<BasicT
 		    None => x.clone(),
 		}
 	    },
+	    BasicType::Str { name, args } => {
+		BasicType::Str { name: name.clone(), args: subst_matches(args, matches) }
+	    }
 	    _ => x.clone()
 	}
     }).collect()
@@ -237,7 +237,10 @@ async fn pattern_match(data: &BasicType, pattern: &BasicType) -> Option<VarSubst
 	(BasicType::Number(x), BasicType::Var{ name, .. }) => {
 	    Some(HashMap::from([(name.clone(), BasicType::Number(*x))]))
 	},
-	(BasicType::Var { value, name }, BasicType::Number(x)) => {
+	(BasicType::Str { name, args }, BasicType::Var { name: var_name, .. }) => {
+	    Some(HashMap::from([(var_name.clone(), BasicType::Str { name: name.clone(), args: args.clone() })]))
+	},
+	(BasicType::Var { value, .. }, BasicType::Number(x)) => {
 	    let data = value.get().await;
 	    if let BasicType::Number(y) = data {
 		if *x == y {
@@ -249,13 +252,28 @@ async fn pattern_match(data: &BasicType, pattern: &BasicType) -> Option<VarSubst
 		None
 	    }
 	},
+	(BasicType::Var { value, .. }, BasicType::Atom(x)) => {
+	    let data = value.get().await;
+	    if let BasicType::Atom(y) = data {
+		if x == &y {
+		    Some(HashMap::new())
+		} else {
+		    None
+		}
+	    } else {
+		None
+	    }
+	},
+	(BasicType::Var { value, .. }, BasicType::Str { .. }) => {
+	    let data = value.get().await;
+	    pattern_match(&data, pattern).await
+	},
 	(BasicType::Atom(_), BasicType::Number(_)) => None,
 	(BasicType::Number(_), BasicType::Atom(_)) => None,
 	(BasicType::Atom(_), BasicType::Str { .. }) => None,
 	(BasicType::Str { .. }, BasicType::Atom(_)) => None,
 	(BasicType::Number(_), BasicType::Str { .. }) => None,
 	(BasicType::Str { .. }, BasicType::Number(_)) => None,
-	_ => unreachable!()
     }
 }
 
