@@ -1,13 +1,14 @@
 use std::collections::HashMap;
+use tokio::task::JoinSet;
 use async_recursion::async_recursion;
 
 use crate::types::*;
 
-pub fn run_body_expr_spawn(body: &BodyExpr, matches: &VarSubstitution,  program: &Program) {
+pub fn run_body_expr_spawn(join_set: &mut JoinSet<()>, body: &BodyExpr, matches: &VarSubstitution,  program: &Program) {
     let body = body.clone();
     let matches = matches.clone();
     let program = program.clone();
-    tokio::spawn(async move {
+    join_set.spawn(async move {
 	match run_body_expr(&body, &matches).await {
 	    State::Stop => (),
 	    State::Call(call) => run(call, &program).await,
@@ -17,21 +18,26 @@ pub fn run_body_expr_spawn(body: &BodyExpr, matches: &VarSubstitution,  program:
 
 pub async fn run(query: BasicType, program: &Program) {
     let mut query = query;
+    let mut join_set = tokio::task::JoinSet::new();
     'outer: loop {
         for rule in program.rules.iter() {
 	    if let Some(mut matches) = pattern_match(&query, &rule.head).await {
-		add_vars_not_in_head(&mut matches, &rule.body);
-		for body in &rule.body[1..] {
-		    run_body_expr_spawn(body, &matches, program);
+		if eval_guard(&rule.guard, &matches).await == true {
+		    add_vars_not_in_head(&mut matches, &rule.body);
+		    for body in &rule.body[1..] {
+			run_body_expr_spawn(&mut join_set, body, &matches, program);
+		    }
+		    match run_body_expr(&rule.body[0], &matches).await {
+			State::Stop => break 'outer,
+			State::Call(call) => query = call,
+		    }
+		    break;
 		}
-		match run_body_expr(&rule.body[0], &matches).await {
-		    State::Stop => break 'outer,
-		    State::Call(call) => query = call,
-		}
-		break;
 	    }
 	}
     }
+
+    while let Some(_) = join_set.join_next().await { }
 }
 
 fn add_vars_not_in_head(matches: &mut VarSubstitution, body_exprs: &Vec<BodyExpr>) {
@@ -40,16 +46,17 @@ fn add_vars_not_in_head(matches: &mut VarSubstitution, body_exprs: &Vec<BodyExpr
 	    BodyExpr::Assign { var, .. } => {
 		if let BasicType::Var { name, value } = var {
 		    if let None = matches.get(name) {
-			matches.insert(name.clone(), BasicType::Var { name: name.clone(), value: value.clone()});
+			matches.insert(name.clone(), BasicType::Var { name: name.clone(), value: VarValue::new()});
 		    }
 		}
 	    },
 	    BodyExpr::Is { left, right } => {
 		if let BasicType::Var { name, value } = left {
 		    if let None = matches.get(name) {
-			matches.insert(name.clone(), BasicType::Var { name: name.clone(), value: value.clone()});
+			matches.insert(name.clone(), BasicType::Var { name: name.clone(), value: VarValue::new()});
 		    }
 		}
+		add_vars_not_in_head_math_expr(matches, right);
 	    },
 	    BodyExpr::Call(call) => {
 		add_vars_not_in_head_basic_type(matches, &call);
@@ -79,7 +86,7 @@ fn add_vars_not_in_head_basic_type(matches: &mut VarSubstitution, basic_type: &B
     match basic_type {
 	BasicType::Var { name, value } => {
 	    if let None = matches.get(name) {
-		matches.insert(name.clone(), BasicType::Var { name: name.clone(), value: value.clone()});
+		matches.insert(name.clone(), BasicType::Var { name: name.clone(), value: VarValue::new()});
 	    }
 	},
 	BasicType::Str { args, .. } => {
@@ -106,7 +113,14 @@ async fn run_body_expr(body: &BodyExpr, matches: &VarSubstitution) -> State {
 		BasicType::Str { name, args } => {
 		    let args = subst_matches(args, matches);
 		    if name == "print" {
-			println!("{}", args[0]);
+			match &args[0] {
+			    BasicType::Var { value, .. } => {
+				println!("{}", value.get().await);
+			    },
+			    _ => {
+				println!("{}", args[0]);
+			    }
+			}
 			return State::Stop;
 		    }
 		    State::Call(BasicType::Str { name: name.clone(), args })
@@ -122,14 +136,7 @@ async fn run_body_expr(body: &BodyExpr, matches: &VarSubstitution) -> State {
 	    let args = subst_matches(&vec![var.clone(), value.clone()], matches);
 	    // tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 	    if let BasicType::Var { value: var_value, .. } = &args[0] {
-		let mut data = var_value.channel.lock.write().await;
-		match *data {
-		    None => {
-			*data = Some(args[1].clone());
-		    },
-		    _ => unreachable!()
-		}
-		var_value.channel.notify.notify_waiters();
+		var_value.set(args[1].clone()).await;
 	    }
 	    State::Stop
 	}
@@ -137,16 +144,9 @@ async fn run_body_expr(body: &BodyExpr, matches: &VarSubstitution) -> State {
 	    let args = subst_matches(&vec![left.clone()], matches);
 	    let math_expr = subst_matches_math_expr(right, matches);
 
-	    if let BasicType::Var { value: var_value, .. } = &args[0] {
+	    if let BasicType::Var { value: var_value, name } = &args[0] {		
 		let result = eval_math_expr(&math_expr).await;
-		let mut data = var_value.channel.lock.write().await;
-		match *data {
-		    None => {
-			*data = Some(BasicType::Number(result));
-		    },
-		    _ => unreachable!()
-		}
-		var_value.channel.notify.notify_waiters();
+		var_value.set(BasicType::Number(result)).await;
 	    }
 	    State::Stop
 	}
@@ -238,31 +238,17 @@ async fn pattern_match(data: &BasicType, pattern: &BasicType) -> Option<VarSubst
 	    Some(HashMap::from([(name.clone(), BasicType::Number(*x))]))
 	},
 	(BasicType::Var { value, name }, BasicType::Number(x)) => {
-	    fn check_data(data: &BasicType, number: i64) -> Option<VarSubstitution> {
-		if let BasicType::Number(y) = data {
-		    if number == *y {
-			return Some(HashMap::new());
-		    } else {
-			return None;
-		    }
+	    let data = value.get().await;
+	    if let BasicType::Number(y) = data {
+		if *x == y {
+		    Some(HashMap::new())
+		} else {
+		    None
 		}
-		return None;
+	    } else {
+		None
 	    }
-	    {
-	        let data = value.channel.lock.read().await;
-		if let Some(ref y) = *data {
-		    return check_data(&y, *x);
-		}
-	    }
-	    value.channel.notify.notified().await;
-	    {
-	        let data = value.channel.lock.read().await;
-		if let Some(ref y) = *data {
-		    return check_data(&y, *x);
-		}
-	    }
-	    return None;
-	},	
+	},
 	(BasicType::Atom(_), BasicType::Number(_)) => None,
 	(BasicType::Number(_), BasicType::Atom(_)) => None,
 	(BasicType::Atom(_), BasicType::Str { .. }) => None,
@@ -280,27 +266,11 @@ async fn eval_math_expr(expr: &MathExpr) -> i64 {
 	    match basic_type {
 		BasicType::Number(x) => *x,
 		BasicType::Var { value, .. } => {
-		    {
-			let data = value.channel.lock.read().await;
-			if let Some(ref x) = *data {
-			    if let BasicType::Number(x) = x { 
-				return *x;
-			    } else {
-				panic!("Not a number");
-			    }
-			}
-		    }
-		    value.channel.notify.notified().await;
-		    {
-			let data = value.channel.lock.read().await;
-			if let Some(ref x) = *data {
-			    if let BasicType::Number(x) = x {
-				return *x;
-			    } else {
-				panic!("Not a number");
-			    }
-			}
-			panic!("Not a value");
+		    let data = value.get().await;
+		    if let BasicType::Number(x) = data { 
+			return x;
+		    } else {
+			panic!("Not a number");
 		    }
 		},
 		_ => unreachable!()
@@ -314,5 +284,69 @@ async fn eval_math_expr(expr: &MathExpr) -> i64 {
 	    let (a, b) = tokio::join!(eval_math_expr(a), eval_math_expr(b));
 	    a - b
 	}	
+    }
+}
+
+async fn eval_guard(guards: &Vec<GuardExpr>, matches: &VarSubstitution) -> bool {
+    for guard in guards {
+	let guard = subst_matches_guard(&guard, matches);
+	match guard {
+	    GuardExpr::Data(basic_type) => {
+		match basic_type {
+		    BasicType::Var { value, .. } => {
+			value.get().await;
+		    },
+		    _ => unreachable!(),
+		}
+	    },
+	    GuardExpr::Equal(left, right) => {
+		let mut left = left;
+		let mut right = right;
+		if let BasicType::Var { value, .. } = left {
+		    left = value.get().await;
+		}
+		if let BasicType::Var { value, .. } = right {
+		    right = value.get().await;
+		}		
+		if pattern_match(&left, &right).await.is_none() {
+		    return false;
+		}
+	    }
+	}
+    }
+    true
+}
+
+fn subst_matches_guard(guard: &GuardExpr, matches: &VarSubstitution) -> GuardExpr {
+    match guard {
+	GuardExpr::Data(var) => {
+	    if let BasicType::Var { ref name, .. } = var {
+		match matches.get(name) {
+		    None => GuardExpr::Data(var.clone()),
+		    Some(x) => GuardExpr::Data(x.clone()),
+		}
+	    } else {
+		guard.clone()
+	    }
+	},
+	GuardExpr::Equal(left, right) => {
+	    let left = if let BasicType::Var { ref name, .. } = left {
+		match matches.get(name) {
+		    None => left.clone(),
+		    Some(x) => x.clone(),
+		}
+	    } else {
+		left.clone()
+	    };
+	    let right = if let BasicType::Var { ref name, .. } = right {
+		match matches.get(name) {
+		    None => right.clone(),
+		    Some(x) => x.clone(),
+		}
+	    } else {
+		right.clone()
+	    };
+	    GuardExpr::Equal(left, right)
+	}
     }
 }

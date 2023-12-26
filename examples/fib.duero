@@ -1,0 +1,5 @@
+fib(N, X) :- N =:= 1 | X := 1.
+fib(N, X) :- N =:= 2 | X := 1.
+fib(N, X) :- N0 is N - 2, N1 is N - 1, fib(N0, X0), fib(N1, X1), X is X0 + X1.
+
+main :- fib(12, X), print(X).

@@ -43,6 +43,32 @@ fn program(input: &str) -> IResult<&str, Program> {
 }
 
 fn rule(input: &str) -> IResult<&str, Rule> {
+    alt((rule_empty_guards, rule_with_guards))(input)
+}
+
+fn rule_with_guards(input: &str) -> IResult<&str, Rule> {
+    let (input, head) = basic_type(input)?;
+    let (input, _) = space1(input)?;
+    let (input, _) = tag(":-")(input)?;
+    let (input, _) = space1(input)?;
+    let (input, guard) = separated_list1(spaced_comma, guard)(input)?;
+    let (input, _) = space1(input)?;
+    let (input, _) = tag("|")(input)?;
+    let (input, _) = space1(input)?;
+    let (input, body) = separated_list1(spaced_comma, body)(input)?;
+    let (input, _) = space0(input)?;
+    let (input, _) = tag(".")(input)?;
+
+    let rule = Rule {
+	head,
+	guard,
+	body,
+    };
+
+    Ok((input, rule))
+}
+
+fn rule_empty_guards(input: &str) -> IResult<&str, Rule> {
     let (input, head) = basic_type(input)?;
     let (input, _) = space1(input)?;
     let (input, _) = tag(":-")(input)?;
@@ -58,6 +84,28 @@ fn rule(input: &str) -> IResult<&str, Rule> {
     };
 
     Ok((input, rule))
+}
+
+fn guard(input: &str) -> IResult<&str, GuardExpr> {
+    alt((guard_data, guard_equal))(input)
+}
+
+fn guard_data(input: &str) -> IResult<&str, GuardExpr> {
+    let (input, _) = tag("data(")(input)?;
+    let (input, var) = basic_type(input)?;
+    let (input, _) = tag(")")(input)?;
+
+    Ok((input, GuardExpr::Data(var)))
+}
+
+fn guard_equal(input: &str) -> IResult<&str, GuardExpr> {
+    let (input, left) = basic_type(input)?;
+    let (input, _) = space1(input)?;
+    let (input, _) = tag("=:=")(input)?;
+    let (input, _) = space1(input)?;
+    let (input, right) = basic_type(input)?;
+
+    Ok((input, GuardExpr::Equal(left, right)))
 }
 
 fn body(input: &str) -> IResult<&str, BodyExpr> {

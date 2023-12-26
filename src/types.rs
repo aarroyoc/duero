@@ -13,9 +13,10 @@ pub struct Rule {
     pub body: Vec<BodyExpr>,
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, Clone)]
 pub enum GuardExpr {
-    
+    Equal(BasicType, BasicType),
+    Data(BasicType),
 }
 
 #[derive(Debug, Clone)]
@@ -57,6 +58,39 @@ impl VarValue {
 	    notify: Notify::new(),
 	    lock: RwLock::new(None)})}
     }
+
+    pub async fn set(&self, data: BasicType) {
+	let mut internal = self.channel.lock.write().await;
+	match *internal {
+	    None => {
+		*internal = Some(data);
+	    },
+	    _ => {
+		dbg!(internal);
+		unreachable!();
+	    }
+	}
+	self.channel.notify.notify_waiters();
+	self.channel.notify.notify_one();
+    }
+
+    pub async fn get(&self) -> BasicType {
+	let notification = self.channel.notify.notified();
+	{
+	    let data = self.channel.lock.read().await;
+	    if let Some(ref data) = *data {
+		return data.clone();
+	    }
+	}
+	notification.await;
+	{
+	    let data = self.channel.lock.read().await;
+	    if let Some(ref data) = *data {
+		return data.clone();
+	    }
+	}
+	panic!("Can't read data");
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -77,7 +111,7 @@ impl std::fmt::Display for BasicType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 	match self {
 	    BasicType::Number(n) => write!(f, "{}", n),
-	    BasicType::Var { name, .. } => write!(f, "{}", name),
+	    BasicType::Var { name, value } => write!(f, "{}", name),
 	    BasicType::Atom(atom) => write!(f, "{}", atom),
 	    BasicType::Str { name, args} => {
 		let args_str: Vec<String> = args.iter().map(|x| x.to_string()).collect();

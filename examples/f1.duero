@@ -1,5 +1,5 @@
 main :- one, two, three, four.
-one :- print one.
-two :- print two.
-three :- print three.
-four :- print four.
+one :- print(one).
+two :- print(two).
+three :- print(three).
+four :- print(four).
